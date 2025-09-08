@@ -1,22 +1,122 @@
-#include "app_proto.h"
+#include "mesh_transport.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
-bool app_build_report(app_report_t* rpt, uint8_t room, uint16_t seq,
-                      uint32_t batch, int8_t rssi, const uint8_t tag[6]) {
-    if (!rpt) return false;
-    rpt->type  = APP_TYPE_REPORT;
-    rpt->room  = room;
-    rpt->seq   = seq;
-    rpt->batch = batch;
-    rpt->rssi  = rssi;
-    memcpy(rpt->tag, tag, 6);
-    return true;
+static const char* TAG = "mesh_tr";
+
+static mesh_rx_cb_t s_rx_cb = NULL;
+static bool         s_is_root = false;
+static mesh_addr_t  s_root_addr = {0};
+static mesh_cfg_simple_t s_cfg = {0};
+static TaskHandle_t s_rx_task = NULL;
+
+static void wifi_init(void) {
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_mesh_netifs(NULL, NULL);
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
-bool app_parse_ack(const uint8_t* buf, uint16_t len, uint16_t* out_seq) {
-    if (!buf || len < sizeof(app_ack_t)) return false;
-    const app_ack_t* ack = (const app_ack_t*)buf;
-    if (ack->type != APP_TYPE_ACK) return false;
-    if (out_seq) *out_seq = ack->seq;
-    return true;
+static void rx_task(void* arg) {
+    while (1) {
+        mesh_addr_t from = {0};
+        mesh_data_t data = {0};
+        int flag = 0;
+        uint8_t buf[256];
+        data.data = buf;
+        data.size = sizeof(buf);
+        if (esp_mesh_recv(&from, &data, portMAX_DELAY, &flag, NULL, 0) == ESP_OK) {
+            if (s_rx_cb) s_rx_cb(&from, data.data, data.size);
+        }
+    }
+}
+
+static void mesh_event_handler(void* arg, esp_event_base_t base,
+                               int32_t id, void* event_data) {
+    switch (id) {
+    case MESH_EVENT_STARTED:
+        ESP_LOGI(TAG, "MESH started, layer=%d", esp_mesh_get_layer());
+        break;
+    case MESH_EVENT_PARENT_CONNECTED:
+        ESP_LOGI(TAG, "PARENT_CONNECTED");
+        break;
+    case MESH_EVENT_PARENT_DISCONNECTED:
+        ESP_LOGW(TAG, "PARENT_DISCONNECTED");
+        break;
+    case MESH_EVENT_ROOT_ADDRESS:
+        memcpy(s_root_addr.addr,
+               ((mesh_event_root_address_t*)event_data)->addr, 6);
+        ESP_LOGI(TAG, "ROOT_ADDRESS " MACSTR, MAC2STR(s_root_addr.addr));
+        break;
+    default: break;
+    }
+}
+
+void mesh_tr_init(bool force_root, const mesh_cfg_simple_t* cfg, mesh_rx_cb_t on_rx) {
+    s_rx_cb = on_rx;
+    memcpy(&s_cfg, cfg, sizeof(s_cfg));
+    ESP_ERROR_CHECK(nvs_flash_init());
+    wifi_init();
+    ESP_ERROR_CHECK(esp_mesh_init());
+    ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID,
+                                               &mesh_event_handler, NULL));
+
+    mesh_cfg_t mcfg = MESH_INIT_CONFIG_DEFAULT();
+    memcpy(mcfg.mesh_id.id, s_cfg.mesh_id, 6);
+    mcfg.channel = s_cfg.channel;
+    mcfg.router.ssid_len = 0;
+    memset(mcfg.router.ssid, 0, sizeof(mcfg.router.ssid));
+    memset(mcfg.router.password, 0, sizeof(mcfg.router.password));
+    mcfg.ap.password = s_cfg.ap_pass[0] ? s_cfg.ap_pass : "keygrid123";
+    mcfg.ap.max_connection = 10;
+    mcfg.crypto_funcs = &g_wifi_default_mesh_crypto_funcs;
+
+    ESP_ERROR_CHECK(esp_mesh_set_config(&mcfg));
+    ESP_ERROR_CHECK(esp_mesh_set_type(force_root ? MESH_ROOT : MESH_NODE));
+    s_is_root = force_root;
+    ESP_ERROR_CHECK(esp_mesh_start());
+
+    if (!s_rx_task) {
+        xTaskCreatePinnedToCore(rx_task, "mesh_rx", 4096, NULL, 5, &s_rx_task, 0);
+    }
+}
+
+bool mesh_tr_is_root(void) { return s_is_root || esp_mesh_is_root(); }
+
+bool mesh_tr_get_root_addr(mesh_addr_t* out) {
+    if (!out) return false;
+    if (mesh_tr_is_root()) {
+        esp_wifi_get_mac(WIFI_IF_STA, out->addr);
+        return true;
+    }
+    if (memcmp(s_root_addr.addr, "\0\0\0\0\0\0", 6) != 0) {
+        *out = s_root_addr;
+        return true;
+    }
+    return false;
+}
+
+bool mesh_tr_send(const mesh_addr_t* to, const void* data, uint16_t len) {
+    if (!to || !data || !len) return false;
+    mesh_data_t m = {
+        .data = (uint8_t*)data,
+        .size = len,
+        .proto = MESH_PROTO_BIN,
+        .tos = MESH_TOS_P2P
+    };
+    return esp_mesh_send((mesh_addr_t*)to, &m, 0, NULL, 0) == ESP_OK;
+}
+
+bool mesh_tr_send_broadcast(const void* data, uint16_t len) {
+    mesh_addr_t any = {.addr = {0xff,0xff,0xff,0xff,0xff,0xff}};
+    return mesh_tr_send(&any, data, len);
 }
