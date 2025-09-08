@@ -1,1 +1,33 @@
+name: build-idf
 
+on:
+  push:
+    paths:
+      - "components/**"
+      - "mesh_node/**"
+      - "mesh_root/**"
+      - ".github/workflows/build-idf.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - { name: mesh_node, path: "mesh_node" }
+          - { name: mesh_root, path: "mesh_root" }
+    container:
+      image: espressif/idf:v5.2.1
+      options: --user 0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cd ${{ matrix.app.path }}
+          idf.py set-target esp32s3
+      - name: Build
+        run: |
+          cd ${{ matrix.app.path }}
+          idf.py build
