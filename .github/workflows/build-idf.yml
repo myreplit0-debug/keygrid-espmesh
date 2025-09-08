@@ -23,11 +23,14 @@ jobs:
       options: --user 0
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
+
+      # IMPORTANT: source the IDF environment before using idf.py
+      - name: Build ${{ matrix.app.name }}
+        shell: bash
         run: |
-          cd ${{ matrix.app.path }}
+          set -e
+          . /opt/esp/idf/export.sh
+          cd "${{ matrix.app.path }}"
+          idf.py --version
           idf.py set-target esp32s3
-      - name: Build
-        run: |
-          cd ${{ matrix.app.path }}
           idf.py build
