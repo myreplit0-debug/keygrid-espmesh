@@ -1,5 +1,7 @@
 menu "KeyGrid Root Config"
-    config KG_PRINT_HEX
-        bool "Hex dump payloads"
-        default y
+
+config KG_PRINT_HEX
+    bool "Hex dump payloads"
+    default y
+
 endmenu
