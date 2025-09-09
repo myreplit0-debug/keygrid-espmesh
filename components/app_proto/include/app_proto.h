@@ -6,7 +6,6 @@
 extern "C" {
 #endif
 
-// Binary packet formats
 typedef struct __attribute__((packed)) {
     uint8_t  type;    // 0x01 report
     uint8_t  room;    // node's room/zone id
