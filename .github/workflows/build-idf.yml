@@ -86,72 +86,63 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # If the build failed, ask ChatGPT to analyze the tail of the log and propose exact diffs
       - name: ChatGPT diagnosis
-        if: failure()
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          APP_NAME: ${{ matrix.app.name }}
-        shell: bash
-        run: |
-          LOG="${APP_NAME}.log"
-          python3 - << 'PY'
-          import os, json, requests
+  if: failure()
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    REPO: ${{ github.repository }}
+    PR_NUMBER: ${{ github.event.pull_request.number }}
+    APP_NAME: ${{ matrix.app.name }}
+  shell: bash
+  run: |
+    export LOG="${APP_NAME}.log"
+    python3 - << 'PY'
+    import os, json, sys
 
-          log_path = os.environ.get("LOG", "build.log")
-          try:
-            log = open(log_path, "r", errors="ignore").read()
-          except FileNotFoundError:
-            log = "(no log file found)"
+    # ensure requests is available even in a bare container
+    try:
+        import requests  # type: ignore
+    except Exception:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "requests"])
+        import requests  # type: ignore
 
-          # keep last ~20k chars to fit comfortably
-          tail = log[-20000:]
+    log_path = os.environ.get("LOG", "build.log")
+    try:
+        log = open(log_path, "r", errors="ignore").read()
+    except FileNotFoundError:
+        log = "(no log file found)"
 
-          prompt = f"""
-          You are a senior ESP-IDF (v5.x) engineer.
-          Analyze this CI compile log. Identify the single most likely root cause and propose exact fixes.
-          Provide concrete file paths and minimal unified diffs. If it's a config (sdkconfig/partitions/CMake),
-          show the exact lines to add/change. If multiple errors appear, focus on the first fatal one.
+    tail = log[-20000:]
 
-          ---- LOG (tail) ----
-          {tail}
-          ---- END LOG ----
-          """
+    prompt = f"""
+    You are a senior ESP-IDF (v5.x) engineer.
+    Analyze this CI compile log. Identify the single most likely root cause and propose exact fixes.
+    Provide concrete file paths and minimal unified diffs. If it's a config (sdkconfig/partitions/CMake),
+    show the exact lines to add/change. If multiple errors appear, focus on the first fatal one.
 
-          headers = {
-              "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-              "Content-Type": "application/json",
-          }
-          data = {
-              "model": "gpt-4o-mini",
-              "input": [{"role":"user","content": prompt}],
-          }
-          r = requests.post("https://api.openai.com/v1/responses", headers=headers, json=data, timeout=120)
-          try:
-              r.raise_for_status()
-              resp = r.json()
-              text = resp.get("output_text") or json.dumps(resp, indent=2)
-          except Exception as e:
-              text = f"OpenAI API call failed: {e}\nResponse: {r.text[:4000]}"
+    ---- LOG (tail) ----
+    {tail}
+    ---- END LOG ----
+    """
 
-          # Job summary
-          with open(os.environ.get('GITHUB_STEP_SUMMARY','summary.md'), 'a') as f:
-              f.write(f"## ChatGPT diagnosis — {os.environ.get('APP_NAME','app')}\n\n")
-              f.write(text)
+    headers = {
+        "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "model": "gpt-4o-mini",
+        "input": [{"role":"user","content": prompt}],
+    }
+    try:
+        r = requests.post("https://api.openai.com/v1/responses", headers=headers, json=data, timeout=120)
+        r.raise_for_status()
+        resp = r.json()
+        text = resp.get("output_text") or json.dumps(resp, indent=2)
+    except Exception as e:
+        text = f"OpenAI API call failed: {e}\nResponse: {getattr(r,'text','')[:4000]}"
 
-          # PR comment (if applicable)
-          pr = os.environ.get("PR_NUMBER")
-          if pr:
-              gh_headers = {
-                "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                "Accept": "application/vnd.github+json"
-              }
-              requests.post(
-                f"https://api.github.com/repos/{os.environ['REPO']}/issues/{pr}/comments",
-                headers=gh_headers,
-                json={"body": f"🤖 **ChatGPT analysis for `{os.environ.get('APP_NAME')}`**\n\n{text}"}
-              )
-          PY
+    with open(os.environ.get('GITHUB_STEP_SUMMARY','summary.md'), 'a') as f:
+        f.write(f"## ChatGPT diagnosis — {os.environ.get('APP_NAME','app')}\n\n{text}\n")
+    PY
