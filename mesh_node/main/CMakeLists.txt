@@ -1,5 +1,5 @@
 idf_component_register(
   SRCS "main.c"
   INCLUDE_DIRS "."
-  REQUIRES app_proto mesh_transport
+  REQUIRES app_proto mesh_transport esp_timer
 )
