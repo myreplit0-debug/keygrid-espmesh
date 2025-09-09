@@ -2,17 +2,7 @@ name: build-idf
 
 on:
   push:
-    paths:
-      - "components/**"
-      - "mesh_node/**"
-      - "mesh_root/**"
-      - ".github/workflows/build-idf.yml"
   pull_request:
-    paths:
-      - "components/**"
-      - "mesh_node/**"
-      - "mesh_root/**"
-      - ".github/workflows/build-idf.yml"
   workflow_dispatch:
 
 jobs:
@@ -21,137 +11,131 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app:
-          - { name: mesh_node, path: "mesh_node", target: "esp32s3" }
-          - { name: mesh_root, path: "mesh_root", target: "esp32s3" }
-
-    container:
-      image: espressif/idf:v5.2.1
-      options: --user 0
+        app: [mesh_node, mesh_root]
+        target: [esp32, esp32s3]
 
     env:
-      # Speed up builds
-      IDF_CCACHE_ENABLE: "1"
+      IDF_VERSION: v5.2.1
+      APP_NAME: ${{ matrix.app }}
+      TARGET: ${{ matrix.target }}
+      # ChatGPT diagnosis (you can override in repo/Org secrets if needed)
+      OPENAI_MODEL: gpt-4o-mini
+      # If you use an OpenAI-compatible proxy, set OPENAI_BASE_URL as a secret.
+      # Otherwise it will default to https://api.openai.com
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # Optional: cache IDF toolchains and ccache (big speedup on repeats)
-      - name: Cache IDF toolchains
-        uses: actions/cache@v4
+      - name: Install Python deps for diagnosis
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      # Set up ESP-IDF (official action)
+      - name: Setup ESP-IDF ${{ env.IDF_VERSION }}
+        uses: espressif/setup-esp-idf@v1
         with:
-          path: |
-            /root/.espressif
-            /root/.cache/ccache
-          key: idf-5.2.1-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt', '**/sdkconfig', '**/idf_component.yml') }}
+          version: ${{ env.IDF_VERSION }}
+          tools-cache: true
 
-      - name: Build ${{ matrix.app.name }}
-        id: build_step
+      # Build the selected app
+      - name: Build ${{ env.APP_NAME }} (${{ env.TARGET }})
+        working-directory: ${{ github.workspace }}/${{ env.APP_NAME }}
         shell: bash
         run: |
-          set -o pipefail
-          . /opt/esp/idf/export.sh
-          cd "${{ matrix.app.path }}"
-
-          echo "== IDF version =="
+          set -euo pipefail
+          echo "== Configuring IDF project for $TARGET =="
           idf.py --version
-
-          echo "== Set target =="
-          idf.py set-target "${{ matrix.app.target }}"
-
-          echo "== Build =="
-          # capture full log while preserving exit code
-          ( idf.py build 2>&1 | tee ../${{ matrix.app.name }}.log )
-          status=${PIPESTATUS[0]}
-
-          # Collect build outputs if present
-          OUT="build"
-          if [ -d "$OUT" ]; then
-            mkdir -p ../artifacts/${{ matrix.app.name }}
-            cp -f $OUT/*.bin $OUT/*.elf $OUT/flasher_args.json $OUT/bootloader/*.bin $OUT/partition_table/*.bin \
-              ../artifacts/${{ matrix.app.name }} 2>/dev/null || true
-          fi
-
-          echo "status=$status" >> $GITHUB_OUTPUT
-          exit $status
+          idf.py fullclean
+          idf.py set-target "$TARGET"
+          # Keep a complete build log for diagnosis
+          idf.py build 2>&1 | tee "${APP_NAME}.log"
+          # Stash paths for artifacts
+          echo "BUILD_DIR=$(pwd)/build" >> $GITHUB_ENV
+          echo "LOG_FILE=$(pwd)/${APP_NAME}.log" >> $GITHUB_ENV
 
       - name: Upload artifacts (bins, elf, logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.app.name }}-artifacts
+          name: ${{ env.APP_NAME }}-${{ env.TARGET }}-artifacts
           path: |
-            artifacts/${{ matrix.app.name }}/
-            ${{ matrix.app.name }}.log
+            ${{ env.BUILD_DIR }}/**/*.bin
+            ${{ env.BUILD_DIR }}/**/*.elf
+            ${{ env.LOG_FILE }}
           if-no-files-found: warn
           retention-days: 7
 
-      # If the build failed, ask ChatGPT to analyze the tail of the log and propose exact diffs
+      # ---- ChatGPT diagnosis step ----
       - name: ChatGPT diagnosis
-        if: failure()
+        if: always()
+        shell: bash
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          APP_NAME: ${{ matrix.app.name }}
-        shell: bash
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ env.OPENAI_MODEL }}
+          LOG: ${{ env.LOG_FILE }}
+          APP_NAME: ${{ env.APP_NAME }}
+          TARGET: ${{ env.TARGET }}
         run: |
-          LOG="${APP_NAME}.log"
-          python3 - << 'PY'
-          import os, json, requests
+          set -euo pipefail
+          python - << 'PY'
+          import os, sys, json, requests
 
-          log_path = os.environ.get("LOG", "build.log")
+          api_key = os.getenv("OPENAI_API_KEY", "")
+          if not api_key:
+              print("ChatGPT diagnosis skipped: OPENAI_API_KEY not set.")
+              sys.exit(0)
+
+          base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")
+          model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+          log_path = os.getenv("LOG", "")
+          app = os.getenv("APP_NAME", "app")
+          target = os.getenv("TARGET", "esp32")
+
           try:
-            log = open(log_path, "r", errors="ignore").read()
-          except FileNotFoundError:
-            log = "(no log file found)"
+              with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                  log = f.read()
+          except Exception as e:
+              print(f"ChatGPT diagnosis: could not read log file: {e}")
+              sys.exit(0)
 
-          # keep last ~20k chars to fit comfortably
-          tail = log[-20000:]
+          # Send the tail of the log (most relevant recent lines)
+          tail = log[-4000:]
 
-          prompt = f"""
-          You are a senior ESP-IDF (v5.x) engineer.
-          Analyze this CI compile log. Identify the single most likely root cause and propose exact fixes.
-          Provide concrete file paths and minimal unified diffs. If it's a config (sdkconfig/partitions/CMake),
-          show the exact lines to add/change. If multiple errors appear, focus on the first fatal one.
+          system_msg = (
+              "You are an expert ESP-IDF/ESP32 build assistant. "
+              "Given a failing build log tail, identify the FIRST root cause error(s), "
+              "explain in 3-6 concise bullet points, and propose exact code or config fixes. "
+              "If success, say 'Build succeeded' briefly."
+          )
+          user_msg = f"App: {app}\nTarget: {target}\n\nLog tail:\n```\n{tail}\n```"
 
-          ---- LOG (tail) ----
-          {tail}
-          ---- END LOG ----
-          """
-
+          url = f"{base.rstrip('/')}/v1/chat/completions"
           headers = {
-              "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+              "Authorization": f"Bearer {api_key}",
               "Content-Type": "application/json",
           }
-          data = {
-              "model": "gpt-4o-mini",
-              "input": [{"role":"user","content": prompt}],
+          payload = {
+              "model": model,
+              "messages": [
+                  {"role": "system", "content": system_msg},
+                  {"role": "user", "content": user_msg},
+              ],
+              "temperature": 0.2,
           }
-          r = requests.post("https://api.openai.com/v1/responses", headers=headers, json=data, timeout=120)
+
           try:
+              r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
               r.raise_for_status()
-              resp = r.json()
-              text = resp.get("output_text") or json.dumps(resp, indent=2)
+              data = r.json()
+              text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+              print("\n===== ChatGPT Diagnosis =====\n")
+              print(text or "(no response text)")
+              print("\n===== End Diagnosis =====\n")
           except Exception as e:
-              text = f"OpenAI API call failed: {e}\nResponse: {r.text[:4000]}"
-
-          # Job summary
-          with open(os.environ.get('GITHUB_STEP_SUMMARY','summary.md'), 'a') as f:
-              f.write(f"## ChatGPT diagnosis — {os.environ.get('APP_NAME','app')}\n\n")
-              f.write(text)
-
-          # PR comment (if applicable)
-          pr = os.environ.get("PR_NUMBER")
-          if pr:
-              gh_headers = {
-                "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                "Accept": "application/vnd.github+json"
-              }
-              requests.post(
-                f"https://api.github.com/repos/{os.environ['REPO']}/issues/{pr}/comments",
-                headers=gh_headers,
-                json={"body": f"🤖 **ChatGPT analysis for `{os.environ.get('APP_NAME')}`**\n\n{text}"}
-              )
+              print(f"ChatGPT diagnosis request failed: {e}")
+              # Do not fail the job just because diagnosis failed
+              sys.exit(0)
           PY
