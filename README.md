@@ -12,3 +12,4 @@ This repo boots a minimal ESP-MESH network for an internal BLE tracking system.
 cd mesh_root
 idf.py set-target esp32s3
 idf.py build flash monitor
+
