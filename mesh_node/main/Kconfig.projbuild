@@ -1,14 +1,19 @@
 menu "KeyGrid Node Config"
-    config KG_ROOM_ID
-        int "Room/Zone ID"
-        default 2
-    config KG_SEND_PERIOD_MS
-        int "Send period (ms)"
-        default 2000
-    config KG_ACK_TIMEOUT_MS
-        int "ACK timeout (ms)"
-        default 300
-    config KG_ACK_RETRIES
-        int "ACK retries"
-        default 3
+
+config KG_ROOM_ID
+    int "Room/Zone ID"
+    default 2
+
+config KG_SEND_PERIOD_MS
+    int "Send period (ms)"
+    default 2000
+
+config KG_ACK_TIMEOUT_MS
+    int "ACK timeout (ms)"
+    default 300
+
+config KG_ACK_RETRIES
+    int "ACK retries"
+    default 3
+
 endmenu
