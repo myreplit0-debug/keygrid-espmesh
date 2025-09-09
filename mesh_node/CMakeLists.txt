@@ -1,5 +1,4 @@
-idf_component_register(
-  SRCS "main.c"
-  INCLUDE_DIRS "."
-  REQUIRES app_proto mesh_transport esp_timer
-)
+cmake_minimum_required(VERSION 3.16)
+set(EXTRA_COMPONENT_DIRS "${CMAKE_SOURCE_DIR}/../components")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(mesh_node)
