@@ -82,6 +82,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+- name: Prep Python (install requests in IDF env)
+  if: ${{ failure() }}
+  shell: bash
+  run: |
+    set -e
+    . /opt/esp/idf/export.sh
+    python -m ensurepip --upgrade || true
+    python -m pip install --upgrade pip
+    python -m pip install --quiet requests
+
       - name: ChatGPT diagnosis
         if: ${{ failure() }}
         env:
