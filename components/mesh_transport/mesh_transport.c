@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include <string.h>
 #include "esp_netif.h"
+#include "esp_mac.h"
 
 static const char* TAG = "mesh_tr";
 static mesh_rx_cb_t s_rx_cb = NULL;
