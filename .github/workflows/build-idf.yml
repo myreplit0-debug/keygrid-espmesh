@@ -51,21 +51,19 @@ jobs:
           . /opt/esp/idf/export.sh
           cd "${{ matrix.app.path }}"
 
-          echo "== IDF version =="
-          idf.py --version
-
-          echo "== Set target =="
-          idf.py set-target "${{ matrix.app.target }}"
-
+          echo "== IDF version ==" && idf.py --version
+          echo "== Set target ==" && idf.py set-target "${{ matrix.app.target }}"
           echo "== Build =="
+
           ( idf.py build 2>&1 | tee ../${{ matrix.app.name }}.log )
           status=${PIPESTATUS[0]}
 
           OUT="build"
           if [ -d "$OUT" ]; then
             mkdir -p ../artifacts/${{ matrix.app.name }}
-            cp -f $OUT/*.bin $OUT/*.elf $OUT/flasher_args.json $OUT/bootloader/*.bin $OUT/partition_table/*.bin \
-              ../artifacts/${{ matrix.app.name }} 2>/dev/null || true
+            cp -f $OUT/*.bin $OUT/*.elf $OUT/flasher_args.json \
+                  $OUT/bootloader/*.bin $OUT/partition_table/*.bin \
+                  ../artifacts/${{ matrix.app.name }} 2>/dev/null || true
           fi
 
           echo "status=$status" >> $GITHUB_OUTPUT
@@ -82,18 +80,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-- name: Prep Python (install requests in IDF env)
-  if: ${{ failure() }}
-  shell: bash
-  run: |
-    set -e
-    . /opt/esp/idf/export.sh
-    python -m ensurepip --upgrade || true
-    python -m pip install --upgrade pip
-    python -m pip install --quiet requests
+      # --- Only runs when a build failed ---
+      - name: Prep Python (install requests in IDF env)
+        if: failure()
+        shell: bash
+        run: |
+          set -e
+          . /opt/esp/idf/export.sh
+          python -m ensurepip --upgrade || true
+          python -m pip install --upgrade pip
+          python -m pip install --quiet requests
 
       - name: ChatGPT diagnosis
-        if: ${{ failure() }}
+        if: failure()
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -105,7 +104,6 @@ jobs:
           export LOG="${APP_NAME}.log"
           python3 - << 'PY'
           import os, json, sys
-          # ensure requests is available even in a bare container
           try:
               import requests  # type: ignore
           except Exception:
@@ -120,12 +118,11 @@ jobs:
               log = "(no log file found)"
 
           tail = log[-20000:]
-
           prompt = f"""
           You are a senior ESP-IDF (v5.x) engineer.
           Analyze this CI compile log. Identify the single most likely root cause and propose exact fixes.
           Provide concrete file paths and minimal unified diffs. If it's a config (sdkconfig/partitions/CMake),
-          show the exact lines to add/change. If multiple errors appear, focus on the first fatal one.
+          show the exact lines to add/change. Focus on the first fatal error.
 
           ---- LOG (tail) ----
           {tail}
@@ -140,6 +137,7 @@ jobs:
               "model": "gpt-4o-mini",
               "input": [{"role":"user","content": prompt}],
           }
+
           try:
               r = requests.post("https://api.openai.com/v1/responses", headers=headers, json=data, timeout=120)
               r.raise_for_status()
