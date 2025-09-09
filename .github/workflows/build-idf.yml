@@ -7,6 +7,12 @@ on:
       - "mesh_node/**"
       - "mesh_root/**"
       - ".github/workflows/build-idf.yml"
+  pull_request:
+    paths:
+      - "components/**"
+      - "mesh_node/**"
+      - "mesh_root/**"
+      - ".github/workflows/build-idf.yml"
   workflow_dispatch:
 
 jobs:
@@ -16,21 +22,136 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - { name: mesh_node, path: "mesh_node" }
-          - { name: mesh_root, path: "mesh_root" }
+          - { name: mesh_node, path: "mesh_node", target: "esp32s3" }
+          - { name: mesh_root, path: "mesh_root", target: "esp32s3" }
+
     container:
       image: espressif/idf:v5.2.1
       options: --user 0
+
+    env:
+      # Speed up builds
+      IDF_CCACHE_ENABLE: "1"
+
     steps:
       - uses: actions/checkout@v4
 
-      # IMPORTANT: source the IDF environment before using idf.py
+      # Optional: cache IDF toolchains and ccache (big speedup on repeats)
+      - name: Cache IDF toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.espressif
+            /root/.cache/ccache
+          key: idf-5.2.1-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt', '**/sdkconfig', '**/idf_component.yml') }}
+
       - name: Build ${{ matrix.app.name }}
+        id: build_step
         shell: bash
         run: |
-          set -e
+          set -o pipefail
           . /opt/esp/idf/export.sh
           cd "${{ matrix.app.path }}"
+
+          echo "== IDF version =="
           idf.py --version
-          idf.py set-target esp32s3
-          idf.py build
+
+          echo "== Set target =="
+          idf.py set-target "${{ matrix.app.target }}"
+
+          echo "== Build =="
+          # capture full log while preserving exit code
+          ( idf.py build 2>&1 | tee ../${{ matrix.app.name }}.log )
+          status=${PIPESTATUS[0]}
+
+          # Collect build outputs if present
+          OUT="build"
+          if [ -d "$OUT" ]; then
+            mkdir -p ../artifacts/${{ matrix.app.name }}
+            cp -f $OUT/*.bin $OUT/*.elf $OUT/flasher_args.json $OUT/bootloader/*.bin $OUT/partition_table/*.bin \
+              ../artifacts/${{ matrix.app.name }} 2>/dev/null || true
+          fi
+
+          echo "status=$status" >> $GITHUB_OUTPUT
+          exit $status
+
+      - name: Upload artifacts (bins, elf, logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app.name }}-artifacts
+          path: |
+            artifacts/${{ matrix.app.name }}/
+            ${{ matrix.app.name }}.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # If the build failed, ask ChatGPT to analyze the tail of the log and propose exact diffs
+      - name: ChatGPT diagnosis
+        if: failure()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          APP_NAME: ${{ matrix.app.name }}
+        shell: bash
+        run: |
+          LOG="${APP_NAME}.log"
+          python3 - << 'PY'
+          import os, json, requests
+
+          log_path = os.environ.get("LOG", "build.log")
+          try:
+            log = open(log_path, "r", errors="ignore").read()
+          except FileNotFoundError:
+            log = "(no log file found)"
+
+          # keep last ~20k chars to fit comfortably
+          tail = log[-20000:]
+
+          prompt = f"""
+          You are a senior ESP-IDF (v5.x) engineer.
+          Analyze this CI compile log. Identify the single most likely root cause and propose exact fixes.
+          Provide concrete file paths and minimal unified diffs. If it's a config (sdkconfig/partitions/CMake),
+          show the exact lines to add/change. If multiple errors appear, focus on the first fatal one.
+
+          ---- LOG (tail) ----
+          {tail}
+          ---- END LOG ----
+          """
+
+          headers = {
+              "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+              "Content-Type": "application/json",
+          }
+          data = {
+              "model": "gpt-4o-mini",
+              "input": [{"role":"user","content": prompt}],
+          }
+          r = requests.post("https://api.openai.com/v1/responses", headers=headers, json=data, timeout=120)
+          try:
+              r.raise_for_status()
+              resp = r.json()
+              text = resp.get("output_text") or json.dumps(resp, indent=2)
+          except Exception as e:
+              text = f"OpenAI API call failed: {e}\nResponse: {r.text[:4000]}"
+
+          # Job summary
+          with open(os.environ.get('GITHUB_STEP_SUMMARY','summary.md'), 'a') as f:
+              f.write(f"## ChatGPT diagnosis — {os.environ.get('APP_NAME','app')}\n\n")
+              f.write(text)
+
+          # PR comment (if applicable)
+          pr = os.environ.get("PR_NUMBER")
+          if pr:
+              gh_headers = {
+                "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                "Accept": "application/vnd.github+json"
+              }
+              requests.post(
+                f"https://api.github.com/repos/{os.environ['REPO']}/issues/{pr}/comments",
+                headers=gh_headers,
+                json={"body": f"🤖 **ChatGPT analysis for `{os.environ.get('APP_NAME')}`**\n\n{text}"}
+              )
+          PY
