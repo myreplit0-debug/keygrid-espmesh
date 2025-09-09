@@ -24,10 +24,16 @@ typedef struct __attribute__((packed)) {
 #define APP_TYPE_REPORT 0x01
 #define APP_TYPE_ACK    0x02
 
-bool app_build_report(app_report_t* rpt, uint8_t room, uint16_t seq,
-                      uint32_t batch, int8_t rssi, const uint8_t tag[6]);
+bool app_build_report(app_report_t* rpt,
+                      uint8_t room,
+                      uint16_t seq,
+                      uint32_t batch,
+                      int8_t rssi,
+                      const uint8_t tag[6]);
 
-bool app_parse_ack(const uint8_t* buf, uint16_t len, uint16_t* out_seq);
+bool app_parse_ack(const uint8_t* buf,
+                   uint16_t len,
+                   uint16_t* out_seq);
 
 #ifdef __cplusplus
 }
